@@ -13,7 +13,7 @@ var requiresDynamicModule = path.join(outputdir, 'requires-dynamic.js');
 var dependentFile = path.join(outputdir, 'dependent.txt');
 
 test('make sure it builds and builds again', function(t) {
-  t.plan(7);
+  t.plan(12);
 
   rimraf(outputdir, {disableGlob:true}, function(err) {
     t.notOk(err, 'dir removed');
@@ -26,6 +26,7 @@ test('make sure it builds and builds again', function(t) {
 
   function build1() {
     fs.writeFileSync(dynamicModule, 'console.log("a")');
+    fs.writeFileSync(dependentFile, 'foobar1');
 
     var b1 = make();
 
@@ -47,8 +48,9 @@ test('make sure it builds and builds again', function(t) {
 
     var b2 = make();
 
-    b2.on('changedDeps', function(invalidated) {
+    b2.on('changedDeps', function(invalidated, deleted) {
       t.ok(invalidated && invalidated.length == 1, 'one file changed');
+      t.ok(deleted.length == 0, 'nothing deleted');
     });
 
     b2.bundle()
@@ -59,6 +61,9 @@ test('make sure it builds and builds again', function(t) {
       })
       .pipe(fs.createWriteStream(path.join(outputdir, 'build2.js')))
       .on('finish', function() {
+        var build2 = fs.readFileSync(path.join(outputdir, 'build2.js'), 'utf8');
+        t.ok(build2.indexOf('console.log("b")') >= 0, 'bundle has new contents');
+
         setTimeout(function() {
           build3();
         }, 2000); // mtime resolution can be 1-2s depending on OS
@@ -67,19 +72,26 @@ test('make sure it builds and builds again', function(t) {
 
   function build3() {
     // dependentFile is changed
-    fs.writeFileSync(dependentFile, 'hello');
+    fs.writeFileSync(dependentFile, 'foobar2');
 
     var b3 = make();
 
-    // TODO Not sure how to assert that dynamicModule was invalidated
+    b3.on('changedDeps', function(invalidated, deleted) {
+      t.ok(invalidated.length == 0, 'nothing changed');
+      t.ok(deleted.length == 0, 'nothing deleted');
+    });
 
     b3.bundle()
       .pipe(through())
+      .pipe(fs.createWriteStream(path.join(outputdir, 'build3.js')))
       .on('finish', function() {
         t.ok(true, 'built thrice');
+
+        var build3 = fs.readFileSync(path.join(outputdir, 'build3.js'), 'utf8');
+        t.ok(build3.indexOf('foobar2') >= 0, 'bundle has new contents');
+
         t.end();
-      })
-      .pipe(fs.createWriteStream(path.join(outputdir, 'build3.js')));
+      });
   }
 });
 
@@ -100,7 +112,12 @@ function make() {
       return through();
 
     return through(function(chunk, enc, cb) {
-      this.push(chunk);
+      var combined = new Buffer(
+        chunk.toString() + '\nconsole.log("dependent.txt:", ' +
+        JSON.stringify(fs.readFileSync(dependentFile, 'utf8')) +
+        ');\n'
+      );
+      this.push(combined);
       this.emit('file', dependentFile);
       cb();
     });
